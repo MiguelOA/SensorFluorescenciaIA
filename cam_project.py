@@ -8,7 +8,7 @@
 #*************************************************************** LIBRERIAS
 print ("Cargando librerias...")
 from picamera import PiCamera, Color
-from time     import sleep
+import time
 from tkinter import *
 from tkinter import ttk
 from tkinter import messagebox
@@ -16,7 +16,7 @@ from tkinter import filedialog as fd
 import threading
 from io import BytesIO
 from PIL import Image, ImageGrab, ImageTk
-import multiprocessing
+from multiprocessing import  Process
 from pathlib import Path
 from datetime import datetime
 from datetime import date
@@ -25,6 +25,7 @@ import os
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, letter
 import tflite_runtime.interpreter as tfl
+import serial
 print ("Librerias cargadas: OK")
 
 
@@ -48,8 +49,13 @@ input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 name = ''
 idPac = ''
+playTemp = False
+medicion = ''
+ser = serial.Serial(port='/dev/ttyS0',
+	baudrate=115200)
 
 #*************************************************************** FUNCIONES
+#Funcion obsoleta
 def fnStream():
 	global image
 	global image_tk1
@@ -59,12 +65,110 @@ def fnStream():
 	image_tk1 = ImageTk.PhotoImage(image)
 	label_video.configure(image=image_tk1)
 		#sleep(1.0 / fps)
+#---------------
+
+def fn_registro_temperatura(TAco, TTra, TCic, NCic):
+	global playTemp
+	i = 0
+	valle = False
+	parte2 = True
+	sendDataCOMM('S')
+	print(readDataCOMM())
+	sendDataCOMM(str(TAco))
+	print(readDataCOMM())
+	sendDataCOMM('R')
+	print(readDataCOMM())
+	dif = 0
+	while playTemp:
+		if dif <= 0:
+			if valle:
+				sendDataCOMM('0')
+			else:
+				if(i > 0):
+					fnCapture()
+				i = i + 1
+				if(i > NCic):
+					if parte2:
+						parte2 = False
+						i = 1
+						sendDataCOMM('S')
+						print(readDataCOMM())
+						sendDataCOMM(str(TTra))
+						print(readDataCOMM())
+						sendDataCOMM('R')
+						print(readDataCOMM())
+					else:
+						lblCAct.config(text='Ciclo Actual: NA')
+						lblTMed.config(text='Temperatura: NA')
+						playTemp = False
+						sendDataCOMM('X')
+						return True
+				s2 = 'Ciclo Actual: ' + str(i)
+				lblCAct.config(text=s2)
+				sendDataCOMM('A')
+			valle = not(valle)
+			zero = time.time()
+		sendDataCOMM('M')
+		
+		s = 'Temperatura: ' + readDataCOMM()
+		lblTMed.config(text=s)
+		dif = TCic + zero - time.time()
+	sendDataCOMM('X')
+	return False
+		
+		  
+
+
+
+def sendDataCOMM(Data):
+    global ser
+    Salida = Data.encode('utf-8')
+    ser.write(Salida)
+    print(Salida)
+
+
+def readDataCOMM():
+	global ser
+	c = 0
+	while c < 40:
+		NB = ser.in_waiting
+		if NB == 0:
+			c = c + 1
+		else:
+			c = 41
+		time.sleep(0.2)
+	if c == 41:
+		time.sleep(0.2)
+		NB = ser.in_waiting
+		Salida = ser.read(NB)
+		return Salida.decode('utf-8')
+	else:
+		return "ERR: no read"
+
+
 
 def fnPlay():
-	pass
+	global playTemp
+	playTemp = True
+	try:
+		TAco = float(entTAco.get())
+		TTra = float(entTTra.get())
+		TCic = float(entTCic.get())
+		NCic = int(entNCic.get())
+		formulario()
+		cheDirMed.select()
+		cheSaveData.select()
+		cheSaveImgs.select()
+		x = threading.Thread(target=fn_registro_temperatura, args=(TAco, TTra, TCic, NCic), daemon=True)
+		x.start()
+	except:
+		print('Entradas invalidas')
+	
+	
 
 def fnPause():
-	pass
+	global playTemp
+	playTemp = False
 
 
 def imgExist(img_path):
@@ -87,6 +191,7 @@ def showImg():
 def fnCapture():
 	global image
 	global imagePath
+	global playTemp
 	stream = BytesIO()
 	camera.capture(stream, format='jpeg', quality=90)
 	image = Image.open(stream)
@@ -94,16 +199,25 @@ def fnCapture():
 		('image', '*.jpg'),
 		('All files', '*.*')
 	)
+
+	
 	now = datetime.now()
 	currentTime = now.strftime('%H_%M_%S')
 	today = str(date.today())
 	directory = str(Path.home()) + '/'
-	print(directory)
 	imagePath = directory + today + '__' + currentTime + '.jpg'
-	image.save(imagePath)
-	showImg()
-	if opcDirMed:
-		fnMedir()
+	#predeName = 'set1-img000-0.00_0.00_0.00_0.00_0.00.jpg'
+	#imagePath = fd.asksaveasfilename(defaultextension='.txt', initialfile=predeName, initialdir=directory)
+	try:	
+		image.save(imagePath)
+		showImg()
+		if opcDirMed.get():
+			if not(playTemp):
+				formulario()
+			fnMedir()
+	except:
+		print('No se ha guardado archivo')
+	
 	
 
 
@@ -143,7 +257,6 @@ def fnMedir():
 	RGBData = np.array(RGBData, dtype=np.float32)
 	min_val = np.min(RGBData)
 	max_val = np.max(RGBData)
-	formulario()
 	resultados = predecir(RGBData)
 	guardarPDF(idPac, name, resultados[0], resultados[1], resultados[2], resultados[3], resultados[4])
 	print(imagePath)
@@ -227,7 +340,12 @@ def predecir(data):
 def guardarPDF(idPac ,nombre, cl0, pt1, pt2, pt3, cnt):
 	w, h = letter
 	#nombre, cl0, pt1, pt2, pt3, cnt
-	c = canvas.Canvas('muestra.pdf', pagesize=letter)
+	now = datetime.now()
+	currentTime = now.strftime('%H_%M_%S')
+	today = str(date.today())
+	directory = str(Path.home()) + '/'
+	pdfPath = directory + today + '__' + currentTime + '.pdf'
+	c = canvas.Canvas(pdfPath, pagesize=letter)
 	s = 'ID:' + idPac
 	c.drawString(50, h-50, s)
 	s = 'Paciente:' + nombre
@@ -302,19 +420,25 @@ def formulario():
 #camera.stop_recording()
 #camera.annotate_text = "_mini pro_"
 
+
+
+
 camera.preview_fullscreen = False
 camera.preview_window = (505, 161, 600, 360)
 
-camera.awb_mode = 'auto'
-camera.exposure_mode = 'auto'
-
+camera.awb_mode = 'off'
+#camera.exposure_mode = 'off'
+camera.image_effect = 'none'
 camera.resolution = (600,360)
 
 camera.sensor_mode = 2
 
-camera.awb_mode = 'auto'
-camera.exposure_mode = 'auto'
+camera.awb_mode = 'off'
+camera.awb_gains = (1.4, 1.4)
+camera.image_effect = 'none'
 camera.resolution = (600,360)
+
+
 #****************************************************************** WINDOW
 window = Tk()
 screen_width = window.winfo_screenwidth()
@@ -345,12 +469,22 @@ lblRes = Label(frameRes, text='Resultados')
 frameTAco = Frame(frameTemp, background='blue')
 lblTAco = Label(frameTAco, text='Temperatura Acondicionamiento')
 entTAco = Entry(frameTAco, width=10)
-frameTEnf = Frame(frameTemp, background='blue')
-lblTEnf = Label(frameTEnf, text='Temperatura Enfriamiento')
-entTEnf = Entry(frameTEnf, width=10)
+entTAco.insert(0, '65.0')
+frameTTra = Frame(frameTemp, background='blue')
+lblTTra = Label(frameTTra, text='Temperatura Tratamiento') #Mayor que
+entTTra = Entry(frameTTra, width=10)
+entTTra.insert(0, '95.0')
+frameTCic = Frame(frameTemp, background='blue')
+lblTCic = Label(frameTCic, text='Tiempo del Ciclo')
+entTCic = Entry(frameTCic, width=10)
+entTCic.insert(0, '5')
+frameEST = Frame(frameTemp, background='blue')
+lblTMed = Label(frameEST, text='Temperatura: NA')
+lblCAct = Label(frameEST, text='Ciclo actual: NA')
 frameNCic = Frame(frameTemp, background='blue')
-lblNCic = Label(frameNCic, text='Temperatura Num Ciclos')
+lblNCic = Label(frameNCic, text='Num Ciclos')
 entNCic = Entry(frameNCic, width=10)
+entNCic.insert(0, '2')
 framePlayPause = Frame(frameTemp, background='#FF00FF')
 btnPlay = Button(framePlayPause, text='Play', command=fnPlay)
 btnPause = Button(framePlayPause, text='Pause', command=fnPause)
@@ -375,9 +509,15 @@ lblRes.pack(side='top', padx=(270,270) )
 frameTAco.pack(fill='both', expand=1, side='top')
 lblTAco.pack(expand=1, side='left')
 entTAco.pack(expand=1, side='left')
-frameTEnf.pack(fill='both', expand=1, side='top')
-lblTEnf.pack(expand=1, side='left')
-entTEnf.pack(expand=1, side='left')
+frameTTra.pack(fill='both', expand=1, side='top')
+lblTTra.pack(expand=1, side='left')
+entTTra.pack(expand=1, side='left')
+frameTCic.pack(fill='both', expand=1, side='top')
+lblTCic.pack(expand=1, side='left')
+entTCic.pack(expand=1, side='left')
+frameEST.pack(fill='both', expand=1, side='top')
+lblTMed.pack(expand=1, side='left')
+lblCAct.pack(expand=1, side='left')
 frameNCic.pack(fill='both', expand=1, side='top')
 lblNCic.pack(expand=1, side='left')
 entNCic.pack(expand=1, side='left')
@@ -398,6 +538,7 @@ fnStream()
 camera.start_preview()
 
 window.mainloop()
+playTemp = False
 camera.stop_preview()
 
 
